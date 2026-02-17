@@ -1091,20 +1091,11 @@ def process_files(
     }
 
 
-def compare_regions(
-    forearm_files=None,
-    cheek_files=None,
-    shoulder_files=None,
-    foot_files=None,
+def compare_regions_dynamic(
+    pools,
     sf=12.5,
     duration=60,
     show_confidence=True,
-    forearm_evolution_indices=None,
-    cheek_evolution_indices=None,
-    shoulder_evolution_indices=None,
-    foot_evolution_indices=None,
-    fontsize=17,
-    fontsizeL=13,
     title_size=20,
     axis_label_size=14,
     tick_size=12,
@@ -1113,52 +1104,33 @@ def compare_regions(
     line_width=2.0,
     alpha_value=0.4,
     grid_on=True,
-    forearm_color="#1f77b4",
-    cheek_color="#d62728",
-    shoulder_color="#2ca02c",
-    foot_color="#9467bd"
+    return_data=False
 ):
-    regions = {
-        "Forearm": {
-            "files": forearm_files,
-            "evo_idx": forearm_evolution_indices,
-            "color": forearm_color
-        },
-        "Cheek": {
-            "files": cheek_files,
-            "evo_idx": cheek_evolution_indices,
-            "color": cheek_color
-        },
-        "Shoulder": {
-            "files": shoulder_files,
-            "evo_idx": shoulder_evolution_indices,
-            "color": shoulder_color
-        },
-        "Foot": {
-            "files": foot_files,
-            "evo_idx": foot_evolution_indices,
-            "color": foot_color
-        }
-    }
-
     processed = {}
+    colors = {}
 
-    for region_name, info in regions.items():
-        files = info["files"]
-        evo_idx = info["evo_idx"]
+    # ------------------------------------------------------------
+    # Load and process all pools
+    # ------------------------------------------------------------
+    for pool in pools:
+        name = pool["name"]
+        files = pool["paths"]
+        color = pool["color"]
+        colors[name] = color
 
         if files and len(files) > 0:
-            processed[region_name] = process_files(
+            processed[name] = process_files(
                 files,
                 sf=sf,
                 start_seconds=0,
                 end_seconds=duration,
                 show_evolution=False,
-                evolution_indices=evo_idx
+                evolution_indices=None
             )
         else:
-            processed[region_name] = None
+            processed[name] = None
 
+    # Find reference region with valid time axis
     reference_region = next(
         (processed[r] for r in processed
          if processed[r] is not None and processed[r]["common_time"].size > 0),
@@ -1166,16 +1138,17 @@ def compare_regions(
     )
 
     if reference_region is None:
-        st.error("No valid data provided for any region.")
+        st.error("No valid data provided for any pool.")
         return
 
     common_time = reference_region["common_time"]
 
-    # FIGURE 1 — All curves + means
+    # ------------------------------------------------------------
+    # FIGURE 1 — All curves + mean + CI
+    # ------------------------------------------------------------
     fig1, ax1 = plt.subplots(figsize=(12, 7))
 
-    for region_name, info in regions.items():
-        data = processed[region_name]
+    for region_name, data in processed.items():
         if data is None or data["common_time"].size == 0:
             continue
 
@@ -1183,24 +1156,27 @@ def compare_regions(
         mean_curve = data["mean_curve"]
         std_curve = np.nanstd(curves, axis=0)
 
-        base_color = info["color"]
+        base_color = colors[region_name]
 
+        # Plot all curves
         for occl in curves:
             ax1.plot(common_time, occl, color=base_color,
                      alpha=alpha_value, linewidth=line_width)
 
+        # Plot mean
         ax1.plot(common_time, mean_curve, color=base_color,
                  lw=line_width + 1, label=f"{region_name} Mean")
 
+        # Confidence shading
         if show_confidence:
-            upper = mean_curve + 1.96 * std_curve
             lower = mean_curve - 1.96 * std_curve
+            upper = mean_curve + 1.96 * std_curve
             ax1.fill_between(common_time, lower, upper,
                              color=base_color, alpha=0.15)
 
     style_axes(
         ax1,
-        title="Occlusion Curves: All Regions (All Curves + Means)",
+        title="Occlusion Curves: All Pools (All Curves + Means)",
         xlabel="Time since occlusion onset (s)",
         ylabel="SIR Peak-to-Peak Magnitude",
         title_size=title_size,
@@ -1211,11 +1187,12 @@ def compare_regions(
     ax1.legend(fontsize=legend_size, loc=legend_loc)
     st.pyplot(fig1)
 
-    # FIGURE 2 — Means only
+    # ------------------------------------------------------------
+    # FIGURE 2 — Means only + CI
+    # ------------------------------------------------------------
     fig2, ax2 = plt.subplots(figsize=(12, 7))
 
-    for region_name, info in regions.items():
-        data = processed[region_name]
+    for region_name, data in processed.items():
         if data is None or data["common_time"].size == 0:
             continue
 
@@ -1223,20 +1200,20 @@ def compare_regions(
         mean_curve = data["mean_curve"]
         std_curve = np.nanstd(curves, axis=0)
 
-        base_color = info["color"]
+        base_color = colors[region_name]
 
         ax2.plot(common_time, mean_curve, color=base_color,
                  lw=line_width + 1, label=f"{region_name} Mean")
 
         if show_confidence:
-            upper = mean_curve + 1.96 * std_curve
             lower = mean_curve - 1.96 * std_curve
+            upper = mean_curve + 1.96 * std_curve
             ax2.fill_between(common_time, lower, upper,
                              color=base_color, alpha=0.15)
 
     style_axes(
         ax2,
-        title="Occlusion Curves: Region Means Only",
+        title="Occlusion Curves: Pool Means Only",
         xlabel="Time since occlusion onset (s)",
         ylabel="SIR Peak-to-Peak Magnitude",
         title_size=title_size,
@@ -1246,6 +1223,24 @@ def compare_regions(
     )
     ax2.legend(fontsize=legend_size, loc=legend_loc)
     st.pyplot(fig2)
+
+    # ------------------------------------------------------------
+    # Return data for numerical analysis
+    # ------------------------------------------------------------
+    if return_data:
+        return {
+            "fig1": fig1,
+            "fig2": fig2,
+            "common_time": common_time,
+            "regions": {
+                region_name: {
+                    "mean": data["mean_curve"],
+                    "std": np.nanstd(data["interpolated_curves"], axis=0)
+                }
+                for region_name, data in processed.items()
+                if data is not None
+            }
+        }
 
 
 ###############################################################################
@@ -1285,12 +1280,8 @@ def find_common_second_pulse_window(waveforms, time, prominence=0.1, width_ps=2,
 
     return slice(start_idx-buffer, stop_idx+buffer)
 
-
-def compare_regions_refractive_index(
-    forearm_files=None,
-    cheek_files=None,
-    shoulder_files=None,
-    foot_files=None,
+def compare_regions_refractive_index_dynamic(
+    pools,
     fmin=0.2,
     fmax=2.0,
     show_confidence=True,
@@ -1302,31 +1293,26 @@ def compare_regions_refractive_index(
     line_width=2.0,
     alpha_value=0.4,
     grid_on=True,
-    forearm_color="#1f77b4",
-    cheek_color="#d62728",
-    shoulder_color="#2ca02c",
-    foot_color="#9467bd",
-    analysis_time=20.0
+    analysis_time=20.0,
+    return_data=False
 ):
-
-    regions = {
-        "Forearm": {"files": forearm_files, "color": forearm_color},
-        "Cheek": {"files": cheek_files, "color": cheek_color},
-        "Shoulder": {"files": shoulder_files, "color": shoulder_color},
-        "Foot": {"files": foot_files, "color": foot_color},
-    }
-
     sf = 12.5
     region_freqs = {}
     region_curves = {}
 
-    for region_name, info in regions.items():
-        files = info["files"]
+    # ------------------------------------------------------------
+    # Compute n(f) for each pool
+    # ------------------------------------------------------------
+    for pool in pools:
+        region_name = pool["name"]
+        color = pool["color"]
+        files = pool["paths"]
+
         if not files:
             continue
 
         n_list = []
-        freqs_full = None
+        freq_list = []
 
         for fp in files:
             data = load(fp)
@@ -1334,77 +1320,100 @@ def compare_regions_refractive_index(
             time = data["time"]
             ref = data["ref"]
 
-            # --- pick waveform at analysis_time ---
             idx = int(round(analysis_time * sf))
             idx = min(idx, wfs.shape[0] - 1)
             wf = wfs[idx]
 
-            # --- SAME windowing as working script ---
             window = find_common_second_pulse_window(wfs, time)
             t_w = time[window]
             wf_w = wf[window]
             ref_w = ref[window]
 
-            # --- SAME alignment as working script ---
             wf_half = wf_w[:len(wf_w)//2]
             ref_half = ref_w[:len(ref_w)//2]
             shift = np.argmax(wf_half) - np.argmax(ref_half)
             ref_aligned = np.roll(ref_w, shift)
 
-            # --- FFT + response ---
             freqs, X = calculate_fft(wf_w, t_w)
-            Y = np.fft.rfft(ref_aligned)
+            Y = np.fft.rfft(ref_aligned, n=len(wf_w))
+
             M = X / Y
             M_mag = np.abs(M)
 
-            # --- refractive index ---
             n_full = calculate_n_sample(M_mag)
 
+            freq_list.append(freqs)
             n_list.append(n_full)
-            if freqs_full is None:
-                freqs_full = freqs
 
-        if freqs_full is not None:
-            region_freqs[region_name] = freqs_full
-            region_curves[region_name] = np.vstack(n_list)
+        max_len_idx = np.argmax([len(f) for f in freq_list])
+        freqs_master = freq_list[max_len_idx]
 
-    if not region_curves:
-        st.error("No valid RI data for any region.")
-        return
+        n_interp_list = []
+        for freqs_i, n_i in zip(freq_list, n_list):
+            n_interp = np.interp(freqs_master, freqs_i, n_i)
+            n_interp_list.append(n_interp)
 
-    # --- frequency mask ---
-    freqs_any = next(iter(region_freqs.values()))
+        region_freqs[region_name] = (freqs_master, color)
+        region_curves[region_name] = np.vstack(n_interp_list)
+
+    # ------------------------------------------------------------
+    # Frequency mask
+    # ------------------------------------------------------------
+    any_region = next(iter(region_freqs.keys()))
+    freqs_any, _ = region_freqs[any_region]
     mask = (freqs_any >= fmin) & (freqs_any <= fmax)
     freqs_plot = freqs_any[mask]
 
-    # ================= FIGURE 1 =================
-    fig1, ax1 = plt.subplots(figsize=(12, 7))
+    # ------------------------------------------------------------
+    # Compute global y-limits
+    # ------------------------------------------------------------
+    global_min = np.inf
+    global_max = -np.inf
 
-    for region_name, info in regions.items():
-        if region_name not in region_curves:
-            continue
-
-        curves = region_curves[region_name][:, mask]
+    for region_name, curves_full in region_curves.items():
+        curves = curves_full[:, mask]
         mean_n = np.nanmean(curves, axis=0)
         std_n = np.nanstd(curves, axis=0)
-        base_color = info["color"]
+
+        lower = np.maximum(mean_n - 1.96 * std_n, 0)
+        upper = mean_n + 1.96 * std_n
+
+        global_min = min(global_min, np.min(lower))
+        global_max = max(global_max, np.max(upper))
+
+    global_min -= 0.02
+    global_max += 0.02
+
+    # ------------------------------------------------------------
+    # FIGURE 1 — All curves + mean + CI
+    # ------------------------------------------------------------
+    fig1, ax1 = plt.subplots(figsize=(12, 7))
+
+    for region_name, curves_full in region_curves.items():
+        freqs_region, color = region_freqs[region_name]
+        curves = curves_full[:, mask]
+
+        mean_n = np.nanmean(curves, axis=0)
+        std_n = np.nanstd(curves, axis=0)
 
         for c in curves:
-            ax1.plot(freqs_plot, c, color=base_color,
+            ax1.plot(freqs_plot, c, color=color,
                      alpha=alpha_value, linewidth=line_width)
 
-        ax1.plot(freqs_plot, mean_n, color=base_color,
+        ax1.plot(freqs_plot, mean_n, color=color,
                  lw=line_width + 1, label=f"{region_name} Mean")
 
         if show_confidence:
-            ax1.fill_between(freqs_plot,
-                             mean_n - 1.96 * std_n,
-                             mean_n + 1.96 * std_n,
-                             color=base_color, alpha=0.15)
+            lower = np.maximum(mean_n - 1.96 * std_n, 0)
+            upper = mean_n + 1.96 * std_n
+            ax1.fill_between(freqs_plot, lower, upper,
+                             color=color, alpha=0.15)
+
+    ax1.set_ylim(global_min, global_max)
 
     style_axes(
         ax1,
-        title=f"Refractive Index vs Frequency by Region (t={analysis_time:.1f}s)",
+        title=f"Refractive Index vs Frequency by Pool (t={analysis_time:.1f}s)",
         xlabel="Frequency (THz)",
         ylabel="Refractive Index n(f)",
         title_size=title_size,
@@ -1415,30 +1424,32 @@ def compare_regions_refractive_index(
     ax1.legend(fontsize=legend_size, loc=legend_loc)
     st.pyplot(fig1)
 
-    # ================= FIGURE 2 =================
+    # ------------------------------------------------------------
+    # FIGURE 2 — Means only + CI
+    # ------------------------------------------------------------
     fig2, ax2 = plt.subplots(figsize=(12, 7))
 
-    for region_name, info in regions.items():
-        if region_name not in region_curves:
-            continue
+    for region_name, curves_full in region_curves.items():
+        freqs_region, color = region_freqs[region_name]
+        curves = curves_full[:, mask]
 
-        curves = region_curves[region_name][:, mask]
         mean_n = np.nanmean(curves, axis=0)
         std_n = np.nanstd(curves, axis=0)
-        base_color = info["color"]
 
-        ax2.plot(freqs_plot, mean_n, color=base_color,
+        ax2.plot(freqs_plot, mean_n, color=color,
                  lw=line_width + 1, label=f"{region_name} Mean")
 
         if show_confidence:
-            ax2.fill_between(freqs_plot,
-                             mean_n - 1.96 * std_n,
-                             mean_n + 1.96 * std_n,
-                             color=base_color, alpha=0.15)
+            lower = np.maximum(mean_n - 1.96 * std_n, 0)
+            upper = mean_n + 1.96 * std_n
+            ax2.fill_between(freqs_plot, lower, upper,
+                             color=color, alpha=0.15)
+
+    ax2.set_ylim(global_min, global_max)
 
     style_axes(
         ax2,
-        title=f"Refractive Index Spectra: Region Means Only (t={analysis_time:.1f}s)",
+        title=f"Refractive Index Spectra: Pool Means Only (t={analysis_time:.1f}s)",
         xlabel="Frequency (THz)",
         ylabel="Refractive Index n(f)",
         title_size=title_size,
@@ -1448,3 +1459,20 @@ def compare_regions_refractive_index(
     )
     ax2.legend(fontsize=legend_size, loc=legend_loc)
     st.pyplot(fig2)
+
+    # ------------------------------------------------------------
+    # Return data for numerical analysis
+    # ------------------------------------------------------------
+    if return_data:
+        return {
+            "fig1": fig1,
+            "fig2": fig2,
+            "freqs": freqs_plot,
+            "regions": {
+                region_name: {
+                    "mean": np.nanmean(curves_full[:, mask], axis=0),
+                    "std": np.nanstd(curves_full[:, mask], axis=0)
+                }
+                for region_name, curves_full in region_curves.items()
+            }
+        }
