@@ -1,14 +1,8 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Feb  6 17:47:07 2026
-
-@author: Joseph Hilton-Tapp
-"""
-
 import streamlit as st
 import numpy as np
 import tempfile
 import os
+import matplotlib.pyplot as plt
 
 from FYP_processing import (
     load_txt_file,
@@ -22,16 +16,14 @@ from FYP_processing import (
 
     # 1D analysis
     find_common_second_pulse_window_1d,
-    
     auto_find_second_pulse_window,
-    
     find_common_second_pulse_window,
 
-    # Regional occlusion
-    compare_regions,
+    # Dynamic regional occlusion
+    compare_regions_dynamic,
 
-    # Regional refractive index
-    compare_regions_refractive_index,
+    # Dynamic regional refractive index
+    compare_regions_refractive_index_dynamic,
 
     # Evolution plots + helpers
     raw_waveform_evolution_full,
@@ -42,6 +34,58 @@ from FYP_processing import (
 )
 
 # -------------------------------------------------------------------------
+# POOL MANAGEMENT
+# -------------------------------------------------------------------------
+
+def init_pools():
+    if "pools" not in st.session_state:
+        st.session_state.pools = []
+
+def add_pool():
+    init_pools()
+    color_cycle = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    next_color = color_cycle[len(st.session_state.pools) % len(color_cycle)]
+    st.session_state.pools.append({
+        "name": f"Pool {len(st.session_state.pools)+1}",
+        "color": next_color,
+        "files": None
+    })
+
+def render_pool_editor(section_key_prefix="pool"):
+    init_pools()
+
+    if st.button("➕ Add Pool", key=f"{section_key_prefix}_add_pool"):
+        add_pool()
+
+    for i, pool in enumerate(st.session_state.pools):
+        st.markdown(f"#### Pool {i+1}")
+
+        pool["name"] = st.text_input(
+            f"Name for Pool {i+1}",
+            pool["name"],
+            key=f"{section_key_prefix}_name_{i}"
+        )
+
+        pool["color"] = st.color_picker(
+            f"Colour for Pool {i+1}",
+            pool["color"],
+            key=f"{section_key_prefix}_color_{i}"
+        )
+
+        uploaded = st.file_uploader(
+            f"Upload `.npz` files for {pool['name']}",
+            type="npz",
+            accept_multiple_files=True,
+            key=f"pool_files_{i}"
+        )
+
+        pool["files"] = uploaded
+
+        if st.button(f"🗑️ Remove Pool {i+1}", key=f"{section_key_prefix}_remove_{i}"):
+            st.session_state.pools.pop(i)
+            st.rerun()
+
+# -------------------------------------------------------------------------
 # APP HEADER
 # -------------------------------------------------------------------------
 
@@ -49,7 +93,7 @@ st.markdown("## 🔬 THz Imaging & Spectroscopy Analysis Suite")
 st.write("Upload your THz `.txt` or `.npz` files to analyse 1D, 2D, and multi-region data.")
 
 # -------------------------------------------------------------------------
-# GLOBAL STYLING PANEL (SIDEBAR)
+# SIDEBAR
 # -------------------------------------------------------------------------
 
 with st.sidebar:
@@ -84,12 +128,6 @@ with st.sidebar:
     alpha_value = st.slider("Line Transparency", 0.1, 1.0, 0.8)
 
     grid_on = st.checkbox("Show Grid", value=True)
-
-    st.markdown("### Region Colours")
-    forearm_color = st.color_picker("Forearm Colour", "#1f77b4")
-    cheek_color = st.color_picker("Cheek Colour", "#d62728")
-    shoulder_color = st.color_picker("Shoulder Colour", "#2ca02c")
-    foot_color = st.color_picker("Foot Colour", "#9467bd")
 
 # -------------------------------------------------------------------------
 # 2D IMAGE VIEW
@@ -201,15 +239,21 @@ elif section == "📈 1D Point Analysis":
         )
 
         render_1d_analysis(view, waveforms, reference, time, window)
-
 # -------------------------------------------------------------------------
 # REGIONAL OCCLUSION CURVE COMPARISON
 # -------------------------------------------------------------------------
 
 elif section == "📊 Regional Comparison — Occlusion Curve":
 
-    st.markdown("### Upload your repeat measurement `.npz` files for each region")
-    
+    st.markdown("### Upload your repeat measurement `.npz` files for each region / participant")
+    render_pool_editor(section_key_prefix="occl")
+
+    st.markdown("---")
+    st.header("⚙️ Occlusion Settings")
+
+    sf = st.number_input("Sampling Frequency (Hz)", value=12.5, step=0.5)
+    duration = st.number_input("Occlusion Duration (s)", value=60.0, step=5.0)
+
     analysis_type = st.selectbox(
         "Select Analysis Type",
         [
@@ -221,50 +265,35 @@ elif section == "📊 Regional Comparison — Occlusion Curve":
         ]
     )
 
-    col1, col2 = st.columns(2)
-    col3, col4 = st.columns(2)
-
-    with col1:
-        vf_files = st.file_uploader("Volar Forearm", type="npz", accept_multiple_files=True)
-    with col2:
-        cheek_files = st.file_uploader("Cheek", type="npz", accept_multiple_files=True)
-    with col3:
-        shoulder_files = st.file_uploader("Shoulder", type="npz", accept_multiple_files=True)
-    with col4:
-        foot_files = st.file_uploader("Foot", type="npz", accept_multiple_files=True)
-
+    # PROCESS BUTTON
     if st.button("Process Regional Analysis"):
 
-        def pair_files(uploaded_files):
-            pairs = []
-            for f in uploaded_files or []:
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".npz")
-                tmp.write(f.read())
-                tmp.close()
-                pairs.append((f, tmp.name))
-            return pairs
+        pool_paths = []
+        for pool in st.session_state.pools:
+            paths = []
+            if pool["files"] is not None:
+                for f in pool["files"]:
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".npz")
+                    tmp.write(f.read())
+                    tmp.close()
+                    paths.append(tmp.name)
 
-        vf_pairs = pair_files(vf_files)
-        cheek_pairs = pair_files(cheek_files)
-        shoulder_pairs = pair_files(shoulder_files)
-        foot_pairs = pair_files(foot_files)
+            if paths:
+                pool_paths.append({
+                    "name": pool["name"],
+                    "color": pool["color"],
+                    "paths": paths
+                })
 
-        all_regions = {
-            "Forearm": vf_pairs,
-            "Cheek": cheek_pairs,
-            "Shoulder": shoulder_pairs,
-            "Foot": foot_pairs
-        }
+        if not pool_paths:
+            st.warning("Please add at least one pool with uploaded `.npz` files.")
+            st.stop()
 
-        # 1. Occlusion Curve
         if analysis_type == "Occlusion Curve":
-            compare_regions(
-                forearm_files=[p[1] for p in vf_pairs],
-                cheek_files=[p[1] for p in cheek_pairs],
-                shoulder_files=[p[1] for p in shoulder_pairs],
-                foot_files=[p[1] for p in foot_pairs],
-                sf=12.5,
-                duration=60,
+            st.session_state.occlusion_results = compare_regions_dynamic(
+                pools=pool_paths,
+                sf=sf,
+                duration=duration,
                 show_confidence=True,
                 title_size=title_size,
                 axis_label_size=axis_label_size,
@@ -274,97 +303,58 @@ elif section == "📊 Regional Comparison — Occlusion Curve":
                 line_width=line_width,
                 alpha_value=alpha_value,
                 grid_on=grid_on,
-                forearm_color=forearm_color,
-                cheek_color=cheek_color,
-                shoulder_color=shoulder_color,
-                foot_color=foot_color
+                return_data=True
             )
 
-        # 2. Evolution Plots (one plot per file)
-        else:
-            for region_name, file_pairs in all_regions.items():
-                if not file_pairs:
-                    continue
-            
-                st.markdown(f"## 📍 {region_name}")
-            
-                for uploaded_file, file_path in file_pairs:
-                    clean_name = clean_filename(uploaded_file.name)
-                    st.markdown(f"### File: `{clean_name}`")
-            
-                    data = np.load(file_path)
-                    waveforms = data["wfs"]
-                    time = data["time"]
-                    reference = data["ref"]
-            
-                    window = find_common_second_pulse_window_1d(waveforms, time)
-            
-                    if analysis_type == "Base Waveform Evolution":
-                        fig = raw_waveform_evolution_full(
-                            waveforms,
-                            12.5,
-                            patient=clean_name,
-                            title_size=title_size,
-                            axis_label_size=axis_label_size,
-                            tick_size=tick_size,
-                            line_width=line_width,
-                            alpha_value=alpha_value,
-                            grid_on=grid_on
-                        )
-                        st.pyplot(fig)
-            
-                    elif analysis_type == "Windowed Waveform Evolution":
-                        fig = raw_waveform_evolution_windowed(
-                            waveforms,
-                            window,
-                            12.5,
-                            patient=clean_name,
-                            title_size=title_size,
-                            axis_label_size=axis_label_size,
-                            tick_size=tick_size,
-                            line_width=line_width,
-                            alpha_value=alpha_value,
-                            grid_on=grid_on
-                        )
-                        st.pyplot(fig)
-            
-                    elif analysis_type == "Sample Impulse Response Evolution":
-                        fig = waveform_evolution(
-                            waveforms,
-                            window,
-                            12.5,
-                            time,
-                            0,
-                            60,
-                            reference,
-                            patient=clean_name,
-                            title_size=title_size,
-                            axis_label_size=axis_label_size,
-                            tick_size=tick_size,
-                            line_width=line_width,
-                            alpha_value=alpha_value,
-                            grid_on=grid_on
-                        )
-                        st.pyplot(fig)
-            
-                    elif analysis_type == "Sample Impulse Response Offset":
-                        fig = waveform_evolution_offset(
-                            waveforms,
-                            window,
-                            12.5,
-                            time,
-                            0,
-                            60,
-                            reference,
-                            patient=clean_name,
-                            title_size=title_size,
-                            axis_label_size=axis_label_size,
-                            tick_size=tick_size,
-                            line_width=line_width,
-                            alpha_value=alpha_value,
-                            grid_on=grid_on
-                        )
-                        st.pyplot(fig)
+    # DISPLAY RESULTS IF THEY EXIST
+    if "occlusion_results" in st.session_state:
+
+        results = st.session_state.occlusion_results
+
+
+        # Numerical analysis
+        st.markdown("## 🔢 Numerical Analysis Across All Pools")
+
+        common_time = results["common_time"]
+
+        time_choice = st.number_input(
+            "Choose a time (s) for analysis",
+            min_value=float(common_time.min()),
+            max_value=float(common_time.max()),
+            value=float(common_time[len(common_time)//2]),
+            step=0.1,
+            format="%.2f"
+        )
+
+        idx = (np.abs(common_time - time_choice)).argmin()
+        st.write(f"Nearest available time: **{common_time[idx]:.2f} s**")
+
+        table = []
+        for region_name, data in results["regions"].items():
+            mean_n = data["mean"]
+            std_n = data["std"]
+            ci95 = 1.96 * std_n
+        
+            # Number of files in this pool
+            N = len([p for p in st.session_state.pools if p["name"] == region_name][0]["files"])
+        
+            # Standard error of the mean
+            sem = std_n[idx] / np.sqrt(N)
+        
+            # 95% CI on the mean (uncertainty)
+            ci95_mean = 1.96 * sem
+        
+            table.append({
+                "Pool": region_name,
+                "Mean n(f)": float(mean_n[idx]),
+                "Std": float(std_n[idx]),
+                "95% CI (data spread) ±": float(ci95[idx]),
+                "Uncertainty on Mean (95% CI) ±": float(ci95_mean),
+                "Reported Value": f"{mean_n[idx]:.4f} ± {ci95_mean:.4f}"
+            })
+
+
+        st.dataframe(table)
 
 # -------------------------------------------------------------------------
 # REGIONAL REFRACTIVE INDEX COMPARISON
@@ -372,43 +362,44 @@ elif section == "📊 Regional Comparison — Occlusion Curve":
 
 elif section == "🔬 Regional Comparison — Refractive Index":
 
-    st.markdown("### Upload your repeat measurement `.npz` files for each region")
+    st.markdown("### Upload your repeat measurement `.npz` files for each region / participant")
+    render_pool_editor(section_key_prefix="ri")
 
-    col1, col2 = st.columns(2)
-    col3, col4 = st.columns(2)
+    st.markdown("---")
+    st.header("⚙️ Refractive Index Settings")
 
-    with col1:
-        vf_files = st.file_uploader("Volar Forearm", type="npz", accept_multiple_files=True)
-    with col2:
-        cheek_files = st.file_uploader("Cheek", type="npz", accept_multiple_files=True)
-    with col3:
-        shoulder_files = st.file_uploader("Shoulder", type="npz", accept_multiple_files=True)
-    with col4:
-        foot_files = st.file_uploader("Foot", type="npz", accept_multiple_files=True)
+    fmin = st.number_input("Minimum Frequency (THz)", value=0.2, step=0.05)
+    fmax = st.number_input("Maximum Frequency (THz)", value=2.0, step=0.05)
+    analysis_time = st.number_input("Analysis Time (s)", value=20.0, step=1.0)
 
+    # PROCESS BUTTON
     if st.button("Process Regional Refractive Index"):
 
-        def save_uploaded(files):
+        pool_paths = []
+        for pool in st.session_state.pools:
             paths = []
-            for f in files or []:
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".npz")
-                tmp.write(f.read())
-                tmp.close()
-                paths.append(tmp.name)
-            return paths
+            if pool["files"] is not None:
+                for f in pool["files"]:
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".npz")
+                    tmp.write(f.read())
+                    tmp.close()
+                    paths.append(tmp.name)
 
-        vf_paths = save_uploaded(vf_files)
-        cheek_paths = save_uploaded(cheek_files)
-        shoulder_paths = save_uploaded(shoulder_files)
-        foot_paths = save_uploaded(foot_files)
+            if paths:
+                pool_paths.append({
+                    "name": pool["name"],
+                    "color": pool["color"],
+                    "paths": paths
+                })
 
-        compare_regions_refractive_index(
-            forearm_files=vf_paths,
-            cheek_files=cheek_paths,
-            shoulder_files=shoulder_paths,
-            foot_files=foot_paths,
-            fmin=0.2,
-            fmax=2.0,
+        if not pool_paths:
+            st.warning("Please add at least one pool with uploaded `.npz` files.")
+            st.stop()
+
+        st.session_state.ri_results = compare_regions_refractive_index_dynamic(
+            pools=pool_paths,
+            fmin=fmin,
+            fmax=fmax,
             show_confidence=True,
             title_size=title_size,
             axis_label_size=axis_label_size,
@@ -418,8 +409,55 @@ elif section == "🔬 Regional Comparison — Refractive Index":
             line_width=line_width,
             alpha_value=alpha_value,
             grid_on=grid_on,
-            forearm_color=forearm_color,
-            cheek_color=cheek_color,
-            shoulder_color=shoulder_color,
-            foot_color=foot_color
+            analysis_time=analysis_time,
+            return_data=True
         )
+
+    # DISPLAY RESULTS IF THEY EXIST
+    if "ri_results" in st.session_state:
+
+        results = st.session_state.ri_results
+
+        # Numerical analysis
+        st.markdown("## 🔢 Numerical Analysis Across All Pools")
+
+        freqs_plot = results["freqs"]
+
+        freq_choice = st.number_input(
+            "Choose a frequency (THz) for analysis",
+            min_value=float(freqs_plot.min()),
+            max_value=float(freqs_plot.max()),
+            value=float(freqs_plot[len(freqs_plot)//2]),
+            step=0.01,
+            format="%.2f"
+        )
+
+        idx = (np.abs(freqs_plot - freq_choice)).argmin()
+        st.write(f"Nearest available frequency: **{freqs_plot[idx]:.3f} THz**")
+
+        table = []
+        for region_name, data in results["regions"].items():
+            mean_n = data["mean"]
+            std_n = data["std"]
+            ci95 = 1.96 * std_n
+        
+            # Number of files in this pool
+            N = len([p for p in st.session_state.pools if p["name"] == region_name][0]["files"])
+        
+            # Standard error of the mean
+            sem = std_n[idx] / np.sqrt(N)
+        
+            # 95% CI on the mean (uncertainty)
+            ci95_mean = 1.96 * sem
+        
+            table.append({
+                "Pool": region_name,
+                "Mean n(f)": float(mean_n[idx]),
+                "Std": float(std_n[idx]),
+                "95% CI (data spread) ±": float(ci95[idx]),
+                "Uncertainty on Mean (95% CI) ±": float(ci95_mean),
+                "Reported Value": f"{mean_n[idx]:.4f} ± {ci95_mean:.4f}"
+            })
+
+
+        st.dataframe(table)
